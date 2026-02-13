@@ -1,5 +1,5 @@
 
-# %% [markdown]
+
 # # Corporate Hybrid Forecast Notebook — v6_4 (Hybrid + Global ML + Exogenous)
 # 
 # **Generated:** 2026-02-09 09:13 UTC  
@@ -12,10 +12,10 @@
 # - Dynamic language splitting (use actual language shares when available; else fixed shares)
 # - **Exogenous features**: EU core holidays & events (auto generator or optional CSV files)
 
-# %% [markdown]
+
 # ## 1. Imports & Config
 
-# %%
+
 import os
 import math
 import warnings
