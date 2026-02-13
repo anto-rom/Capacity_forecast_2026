@@ -40,7 +40,7 @@ try:
     from prophet import Prophet
 except Exception:
     try:
-        from fbprophet import Prophet  # legacy
+        from prophet import Prophet  # legacy
     except Exception:
         Prophet = None
 
@@ -958,11 +958,12 @@ def build_daily_capacity_plan(
 # =========================
 # MAIN
 # =========================
+
 def main():
     # Load
     incoming = load_incoming(INCOMING_SOURCE_PATH, sheet_name=INCOMING_SHEET)
     mapping = load_dept_map(DEPT_MAP_PATH, sheet_name=DEPT_MAP_SHEET)
-    prod = load_productivity(PRODUCTIVITY_PATH)
+    prod_raw = load_productivity(PRODUCTIVITY_PATH)  # granular: agente-día
 
     incoming = apply_mapping(incoming, mapping)
 
@@ -973,43 +974,60 @@ def main():
     # Monthly forecasts
     fc_monthly = forecast_per_dept_lang_monthly(incoming, exo_monthly)
 
-    # Monthly accuracy
+    # Monthly accuracy base (granularity: month x dept x language)
     monthly_actual = build_monthly_series(incoming)
     cap_err = compute_monthly_accuracy_with_history(monthly_actual, fc_monthly, REPORT_START_MONTH)
-    print("cap_err shape:", cap_err.shape)
-    cap_err = apply_mapping(cap_err, mapping)
-    print("cap_err after mapping:", cap_err.shape)
-    cap_err = cap_err.merge(prod, on="department_id", how="left")
-    print("cap_err after prod merge:", cap_err.shape)
-    
-    print("mapping rows:", mapping.shape)
-    print("mapping unique department_id:", mapping["department_id"].nunique())
-    print("mapping duplicated department_id:", mapping.duplicated(["department_id"]).sum())
+    cap_err = apply_mapping(cap_err, mapping)  # OK: mapping es dim 1:1 por dept
 
-    print("prod rows:", prod.shape)
-    print("prod unique department_id:", prod["department_id"].nunique())
-    print("prod duplicated department_id:", prod.duplicated(["department_id"]).sum())
+    # -------------------------
+    # Productivity monthly KPI (dept + month) to avoid merge explosion
+    # -------------------------
+    prod = prod_raw.copy()
 
+    # Expected columns in prod_raw:
+    # department_id, Date, resolved_total, transfer_total
+    if "Date" not in prod.columns:
+        raise ValueError("Productivity raw must contain 'Date' column (agent-day).")
+    if "department_id" not in prod.columns:
+        raise ValueError("Productivity raw must contain 'department_id' column.")
+    if "resolved_total" not in prod.columns or "transfer_total" not in prod.columns:
+        raise ValueError("Productivity raw must contain 'resolved_total' and 'transfer_total' columns.")
 
-    # claves típicas (ajusta si tus nombres son distintos)
-    keys = [c for c in ["month", "department_id", "language"] if c in cap_err.columns]
-    print("keys present:", keys)
+    prod["Date"] = pd.to_datetime(prod["Date"], errors="coerce")
+    prod = prod[prod["Date"].notna()].copy()
 
-    if keys:
-        dup = cap_err.duplicated(keys).sum()
-        print("duplicated rows on keys:", dup)
-        if dup > 0:
-            print("top duplicate counts:")
-            print(
-                cap_err.groupby(keys).size()
-                .sort_values(ascending=False)
-                .head(20)
+    prod["tickets_total"] = (
+        pd.to_numeric(prod["resolved_total"], errors="coerce").fillna(0.0)
+        + pd.to_numeric(prod["transfer_total"], errors="coerce").fillna(0.0)
+    ).astype(np.float32)
+
+    # Align month key with cap_err['month'] (timestamp first day of month)
+    prod["month"] = prod["Date"].dt.to_period("M").dt.to_timestamp()
+
+    # agent_days_month = number of agent-day rows (works even if agent_id not provided)
+    prod_monthly = (
+        prod.groupby(["department_id", "month"], as_index=False)
+            .agg(
+                tickets_total_month=("tickets_total", "sum"),
+                agent_days_month=("tickets_total", "size"),
             )
+    )
 
-    # stop here while debugging
-    return
+    prod_monthly["avg_tickets_per_agent_day"] = np.where(
+        prod_monthly["agent_days_month"] > 0,
+        (prod_monthly["tickets_total_month"] / prod_monthly["agent_days_month"]).astype(np.float32),
+        np.nan,
+    ).astype(np.float32)
 
+    # Safe merge (many cap_err rows -> 1 prod row per dept+month)
+    cap_err = cap_err.merge(
+        prod_monthly[["department_id", "month", "avg_tickets_per_agent_day"]],
+        on=["department_id", "month"],
+        how="left",
+        validate="m:1",
+    )
 
+    # Workdays + capacity calc
     cap_err["workdays_in_month"] = [
         business_days_in_month(pd.Timestamp(m).year, pd.Timestamp(m).month) if pd.notna(m) else np.nan
         for m in cap_err["month"]
@@ -1028,11 +1046,9 @@ def main():
         np.nan,
     ).astype(np.float32)
 
-    print("cap_err shape:", cap_err.shape)
-
-    # Daily plan
+    # Daily plan (can be huge)
     daily_capacity_plan = build_daily_capacity_plan(
-        incoming, mapping, prod, exo_daily, DAILY_HORIZON_DAYS
+        incoming, mapping, prod_monthly, exo_daily, DAILY_HORIZON_DAYS
     )
 
     # --- Export full daily dataset to Parquet (analytical layer) ---
@@ -1051,21 +1067,22 @@ def main():
     # CV table
     cv_table = build_cv_table(fc_monthly, mapping)
 
-    # Run log (siempre)
+    # Run log
     run_log = pd.DataFrame([{
         "timestamp": pd.Timestamp.now(),
         "incoming_rows": int(len(incoming)),
         "fc_monthly_rows": int(len(fc_monthly)) if fc_monthly is not None else -1,
-        "daily_capacity_rows": int(len(daily_capacity_plan)) if daily_capacity_plan is not None else -1,
         "cap_err_rows": int(len(cap_err)) if cap_err is not None else -1,
+        "daily_capacity_rows": int(len(daily_capacity_plan)) if daily_capacity_plan is not None else -1,
         "cv_table_rows": int(len(cv_table)) if cv_table is not None else -1,
-        "parquet_path": str(daily_parquet_path),
+        "daily_parquet_path": str(daily_parquet_path),
     }])
 
-    # Excel: nunca exceder límite de filas
+    # Excel: never exceed row limit
     MAX_EXCEL_ROWS = 1_000_000
 
     if daily_capacity_plan is not None and len(daily_capacity_plan) > MAX_EXCEL_ROWS:
+        # Executive daily view (aggregate)
         daily_capacity_plan_excel = (
             daily_capacity_plan
             .groupby(["Date", "vertical", "department_id"], as_index=False)[
@@ -1079,7 +1096,7 @@ def main():
         daily_capacity_plan_excel = daily_capacity_plan
         excel_note = "Daily included at full granularity (<= Excel row limit)."
 
-    # Write Excel (siempre escribe al menos RUN_LOG)
+    # Write Excel (executive output)
     with pd.ExcelWriter(OUTPUT_XLSX, engine="openpyxl", mode="w") as w:
         run_log.to_excel(w, "RUN_LOG", index=False)
         pd.DataFrame([{"note": excel_note}]).to_excel(w, "README", index=False)
@@ -1100,6 +1117,14 @@ def main():
             pd.DataFrame([{"msg": "mape_table_cv vacío"}]).to_excel(w, "mape_table_cv", index=False)
 
     print(f"Excel written: {OUTPUT_XLSX}")
+
+    return {
+        "run_log": run_log,
+        "cap_err": cap_err,
+        "cv_table": cv_table,
+        "daily_capacity_plan": daily_capacity_plan,
+    }
+  
 
 
 if __name__ == "__main__":
