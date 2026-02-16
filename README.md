@@ -5,7 +5,358 @@ The pipeline integrates forecasting engines (STL/SARIMAX), bias calibration, Ein
 ## 📐 Pipeline Diagram (Markdown‑Friendly)
 <img width="393" height="2268" alt="image" src="https://github.com/user-attachments/assets/ab52b73f-b690-411f-8f70-9db43b129793" />
 
+1. Overview
+The model transforms raw ticket and agent data into:
 
+Accurate monthly ticket forecasts
+Einstein‑adjusted and bias‑calibrated demand
+Agent‑driven capacity & productivity metrics
+Department‑level operational boards
+PowerBI/analytics-ready consolidated dataset
+
+
+2. Architecture
+Full pipeline sections:
+
+Configuration & paths
+Helper utilities
+Forecast engines
+Input loading
+Recommended model mapping
+Daily forecasting
+Monthly aggregation
+Einstein deduction
+Bias calibration
+Agents metrics
+Capacity consolidation
+KPI Board creation
+Consolidated outputs
+Excel export
+
+
+3. Input Requirements
+Mandatory Inputs
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+FilePurposeIncoming_new.xlsxDaily raw ticket activitydepartment.xlsxMapping of departments (ID, Name, Vertical)
+Optional Inputs
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+FilePurposeeinstein.xlsxEinstein-solved ticketsinventory_month.xlsxDaily open ticket inventoryagent_language_n_target.xlsxHistorical capacity (fallback)productivity_agents.xlsxAgent productivity & target data
+All files are normalized and validated automatically.
+
+4. Forecasting Logic
+4.1 Daily Engines
+STL Baseline (default)
+
+Weekly seasonality
+Robust trend extraction
+Log smoothing
+Uses last 7 days pattern as fallback
+
+SARIMAX‑7
+
+SARIMA (1,0,1) × (1,0,1)_7
+Log space modeling
+Uses empirical residual variance
+
+Selection rule:
+Department → recommended engine (if exists) → else STL.
+
+4.2 Monthly Aggregation
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+StepDescriptionSummationDaily p50/p05/p95 → monthly totalsValidationEnsures: p05 ≤ p50 ≤ p95SmoothingReduces noise from irregular months
+
+5. Einstein Deduction
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ConceptDescriptionSolved ticketsTaken from einstein.xlsxRate formulaeinstein_rate = solved / actuals3‑month rollingSmoothes noiseDeductionforecast *= (1 - rate_recent)SafetyClip 0 → 0.9 max deduction
+
+6. Bias-Based Calibration
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+FieldMeaningmape_pctMean Absolute Percentage Errorwape_pctWeighted Absolute Percentage Errorbias_pctSystematic over/under‑forecast
+Calibration formula:
+calib_factor = 1 - bias_pct / 100
+Range: 0.70 → 1.30
+
+Applied to:
+
+Forecast
+P05
+P95
+
+
+7. Agents-Based Capacity & Productivity (v17.3 Key Upgrade)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+KPIDefinitionagents_gt1_dayAgents with meaningful targets (>1)target_mean_gt1_dayMean target of productive agentsprod_sum_dayTicket-equivalent productivity
+Monthly metrics:
+capacity_agents = mean(agents_gt1_day) * mean(target_mean_gt1_day)
+productivity_agents = sum(prod_sum_day)
+
+
+8. Capacity Consolidation
+Priority:
+capacity = agents_capacity if exists else historical_capacity
+productivity = productivity_agents if exists else capacity
+
+Future months:
+Mean of last 3 months of historical capacity.
+
+9. long_dept Construction
+Contains:
+
+Forecast (calibrated)
+Actuals
+Einstein-adjusted values
+Capacity & productivity
+Inventory
+Cleaned numeric fields
+
+This is the central dataset that powers the boards.
+
+10. Boards (Board_[Department]_2627)
+Columns:
+J‑26, F‑26, M‑26, A‑26, M‑26, J‑26 … F‑27
+Rows (KPIs):
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+KPIDescriptionForecastMonthly calibrated forecastActual VolumeActual ticket volumeForecast Accuracy`100 −CapacityMonthly capacityProductivityMonthly productivityDifference Capacity vs ProductivityPercentage differenceExpected Forecast vs CapacityGap between FC and capacityActual Volume vs ProductivityPerformance vs workloadInventoryMean daily open casesCommentsEmpty row for user notes
+All ratios include protection against divide-by-zero.
+
+11. Consolidated Output: capacity_forecast
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ColumnDescriptionMonthJ-26 → F-27department_nameDepartmentKPIMetric nameTotalValue
+Used directly in BI dashboards.
+
+12. Excel Export
+Features:
+
+Full sanitization of sheet names
+Replace or create sheets safely
+Index shown for department boards
+Handles empty datasets gracefully
+Writes all KPI pages + consolidated outputs
+
+
+13. Improvements vs v17.2
+
+Areav17.2v17.3Agents-based capacity❌✔ Full integrationEinstein deductionSimple✔ 3‑month rollingCalibrationManual✔ Automated + boundedSheet exportFragile✔ Sanitized + safeKPI BoardPartial✔ Complete matrixQuantile guardWeak✔ Strict monotonic check
+
+14. How to Run
+Shellpython model_v17_3.pyMostrar más líneas
+Outputs generated to:
+outputs/capacity_forecast_v17_3.xlsx
+
+
+15. Author & Context
+Built for Continuous Improvement & Operations teams across:
+
+Payments
+Partners
+Hospitality
+
+Priorities:
+
+Reliable, stable forecasting
+Capacity-planning alignment
+Operational usability
+Robustness to noisy inputs
 
 
 
